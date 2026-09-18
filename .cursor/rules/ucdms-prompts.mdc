@@ -7,7 +7,7 @@ alwaysApply: true
 
 Before changing login, add-lead, or edit automation, read `prompts/PROMPTS.md`.
 
-- Add lead: `npm test` is login + all add cases; never include edit. One happy-path add is `npm run test:add`. Combined add → edit → stock is `npm run test:flow` (edit and stock still use the Chrome pickers).
+- Add lead: `npm test` is login + all add cases; never include edit. One happy-path add is `npm run test:add`. Combined add → edit → stock is `npm run test:flow` (edit and stock still use the Chrome pickers). pin_code_search: wait for `getareasbypincode` on the full 6-digit pin, pick a numeric area id, wait for `getstatecitybyarea`, then confirm Area / City / State — a typed pin alone is not filled.
 - Edit: `npm run test:edit`. User picks the lead in Chrome. Never open the top row unless they chose that ID.
 - My Stock: `npm run test:stock`. User picks the exact INV ID in a Chrome overlay picker (list / type / refresh / cancel), same as edit. Update enabled fields only; never alter read-only data to force certification. If listing_price is 0, override a non-zero price and confirm it on getlead before Ready For Sale.
 - Stock images: upload Images-tab photos only when certification type is JLR Approved. Skip them for Non-Certified and on dms.jlr.local. Fill the Certification Checklist with Yes only for JLR Approved; leave it unanswered for Non-Certified.

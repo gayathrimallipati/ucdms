@@ -16,6 +16,7 @@ const {
   selectColorAfterMake,
   fillJlrChassis,
   currentSelectLabel,
+  isSelectUnset,
   randomInt,
 } = require('./form');
 const { saveFailedLoginShot, toast } = require('./login');
@@ -75,55 +76,55 @@ async function collectVisibleLeadIds(page) {
   return (await collectVisibleLeads(page)).map((lead) => lead.id);
 }
 
+async function pickDependentSelect(page, fieldId, opts = {}) {
+  if (!(await isVisible(selectWrapper(page, fieldId)))) return null;
+  if (!(await isSelectUnset(page, fieldId))) return null;
+  return selectIfVisible(page, fieldId, { onlyIfEmpty: true, ...opts });
+}
+
 async function fillReasonExtras(page) {
-  const extraMake = page.locator('#rs_make.selectsearch-wrapper');
-  if (!(await isVisible(extraMake))) return;
-  await selectSearchOption(page, 'rs_make');
-  if (await isVisible(page.locator('#rs_model.selectsearch-wrapper'))) {
-    await selectSearchOption(page, 'rs_model');
-  }
-  if (await isVisible(page.locator('#rs_variant.selectsearch-wrapper'))) {
-    await selectSearchOption(page, 'rs_variant');
-  }
-  if (await isVisible(page.locator('#buying_horizon.selectsearch-wrapper'))) {
-    await selectSearchOption(page, 'buying_horizon');
-  }
-  if (await isVisible(page.locator('#budget.selectsearch-wrapper'))) {
-    await selectSearchOption(page, 'budget');
-  }
-  if (await isVisible(page.locator('#rs_subsection.selectsearch-wrapper'))) {
-    await selectSearchOption(page, 'rs_subsection');
-  }
-  await fillIfVisible(page, 'rs_reason', 'Need a different car');
+  // Only selling (5) shows #rs_subsection. Buying a car (1–4) shows make/model/horizon/budget.
+  // Do not require #rs_make — that field is hidden for Only selling.
+  await Promise.race([
+    selectWrapper(page, 'rs_subsection').waitFor({ state: 'visible', timeout: 5000 }),
+    selectWrapper(page, 'rs_make').waitFor({ state: 'visible', timeout: 5000 }),
+  ]).catch(() => {});
+
+  const subsection = await pickDependentSelect(page, 'rs_subsection');
+  if (subsection) console.log(`  Reason (depends on Reason for Selling): ${subsection}`);
+
+  const make = await pickDependentSelect(page, 'rs_make', { waitFor: 'rs_model' });
+  if (make) console.log(`  Make (Interested): ${make}`);
+  const model = await pickDependentSelect(page, 'rs_model', { waitFor: 'rs_variant' });
+  if (model) console.log(`  Model (Interested): ${model}`);
+  const variant = await pickDependentSelect(page, 'rs_variant');
+  if (variant) console.log(`  Variant (Interested): ${variant}`);
+  const horizon = await pickDependentSelect(page, 'buying_horizon');
+  if (horizon) console.log(`  Buying Horizon: ${horizon}`);
+  const budget = await pickDependentSelect(page, 'budget');
+  if (budget) console.log(`  Budget: ${budget}`);
+
+  await fillIfVisible(page, 'rs_reason', 'Need a different car', { onlyIfEmpty: true });
 }
 
 async function fillVisibleDependents(page, { stamp } = {}) {
   const suffix = stamp || Date.now().toString().slice(-6);
   console.log('→ Purchase Master: fill dependent fields that are now visible');
 
-  if (await isVisible(selectWrapper(page, 'source_sub'))) {
-    await waitForRealOptions(page, 'source_sub').catch(() => {});
-    const sub = await selectIfVisible(page, 'source_sub', { onlyIfEmpty: true });
-    if (sub) console.log(`  Sub Source (depends on Source): ${sub}`);
-  }
+  const sub = await pickDependentSelect(page, 'source_sub');
+  if (sub) console.log(`  Sub Source (depends on Source): ${sub}`);
 
-  if (await isVisible(selectWrapper(page, 'executive'))) {
-    await waitForRealOptions(page, 'executive').catch(() => {});
-    const exec = await selectIfVisible(page, 'executive', { onlyIfEmpty: true });
-    if (exec) console.log(`  Executive (depends on Branch): ${exec}`);
-  }
+  const exec = await pickDependentSelect(page, 'executive');
+  if (exec) console.log(`  Executive (depends on Branch): ${exec}`);
 
   const wps = selectWrapper(page, 'wps_executive');
-  if (await isVisible(wps)) {
-    const current = await currentSelectLabel(page, 'wps_executive');
-    if (!current || /^select\s/i.test(current)) {
-      await waitForRealOptions(page, 'wps_executive', 15000).catch(async () => {
-        console.log('  WPS list empty — re-selecting Branch so getWpsExecutives runs');
-        await selectIfVisible(page, 'branch', { waitFor: ['executive', 'wps_executive'] });
-      });
-      const picked = await selectIfVisible(page, 'wps_executive');
-      console.log(`  Workshop Product Specialist (depends on Source + Branch): ${picked || '(none)'}`);
-    }
+  if (await isVisible(wps) && await isSelectUnset(page, 'wps_executive')) {
+    await waitForRealOptions(page, 'wps_executive', 15000).catch(async () => {
+      console.log('  WPS list empty — re-selecting Branch so getWpsExecutives runs');
+      await selectIfVisible(page, 'branch', { waitFor: ['executive', 'wps_executive'] });
+    });
+    const picked = await selectIfVisible(page, 'wps_executive', { onlyIfEmpty: true });
+    console.log(`  Workshop Product Specialist (depends on Source + Branch): ${picked || '(none)'}`);
   }
 
   await fillIfVisible(page, 'referred_by', `Referee${suffix}`, { onlyIfEmpty: true });
@@ -146,29 +147,21 @@ async function fillVisibleDependents(page, { stamp } = {}) {
     await fillIfVisible(page, 'contact_name', `TestCo${suffix}`, { onlyIfEmpty: true });
   }
 
-  if (await isVisible(selectWrapper(page, 'model'))) {
-    await waitForRealOptions(page, 'model').catch(() => {});
-    const model = await selectIfVisible(page, 'model', { onlyIfEmpty: true, waitFor: 'variant' });
-    if (model) console.log(`  Model (depends on Make): ${model}`);
-  }
-  if (await isVisible(selectWrapper(page, 'variant'))) {
-    await waitForRealOptions(page, 'variant').catch(() => {});
-    const variant = await selectIfVisible(page, 'variant', { onlyIfEmpty: true });
-    if (variant) console.log(`  Variant (depends on Model): ${variant}`);
-  }
-  if (await isVisible(selectWrapper(page, 'color'))) {
+  const model = await pickDependentSelect(page, 'model', { waitFor: 'variant' });
+  if (model) console.log(`  Model (depends on Make): ${model}`);
+  const variant = await pickDependentSelect(page, 'variant');
+  if (variant) console.log(`  Variant (depends on Model): ${variant}`);
+  if (await isVisible(selectWrapper(page, 'color')) && await isSelectUnset(page, 'color')) {
     const color = await selectColorAfterMake(page, 'color');
     if (color) console.log(`  Exterior Color (depends on Make): ${color}`);
   }
-  if (await isVisible(selectWrapper(page, 'interior_color'))) {
+  if (await isVisible(selectWrapper(page, 'interior_color')) && await isSelectUnset(page, 'interior_color')) {
     const interior = await selectColorAfterMake(page, 'interior_color').catch(() => null);
     if (interior) console.log(`  Interior Color (depends on JLR Make): ${interior}`);
   }
 
-  if (await isVisible(selectWrapper(page, 'park_and_sell'))) {
-    const park = await selectIfVisible(page, 'park_and_sell', { onlyIfEmpty: true });
-    if (park) console.log(`  Park and Sell (depends on Vehicle Source): ${park}`);
-  }
+  const park = await pickDependentSelect(page, 'park_and_sell');
+  if (park) console.log(`  Park and Sell (depends on Vehicle Source): ${park}`);
 
   const hypo = await currentSelectLabel(page, 'hypothecation');
   if (/^yes$/i.test(hypo || '')) {
@@ -176,11 +169,8 @@ async function fillVisibleDependents(page, { stamp } = {}) {
     console.log('  Bank Name (depends on Hypothecation Yes)');
   }
 
-  if (await isVisible(selectWrapper(page, 'sub_status'))) {
-    await waitForRealOptions(page, 'sub_status').catch(() => {});
-    const subStatus = await selectIfVisible(page, 'sub_status', { onlyIfEmpty: true });
-    if (subStatus) console.log(`  Sub Status (depends on Status): ${subStatus}`);
-  }
+  const subStatus = await pickDependentSelect(page, 'sub_status');
+  if (subStatus) console.log(`  Sub Status (depends on Status): ${subStatus}`);
   await pickDateIfVisible(page, 'followup_date');
 
   await fillReasonExtras(page);
@@ -206,9 +196,7 @@ async function fillAllLeadDetails(page, { stamp, keepExistingCustomer = false } 
   await fillIfVisible(page, 'mobile', uniqueMobile(), { onlyIfEmpty: keepExistingCustomer });
   await fillIfVisible(page, 'email', `pm.lead.${suffix}@example.com`, { onlyIfEmpty: true });
   await checkFirstIfVisible(page, 'contact_method');
-  await fillPinCodeSearch(page, 'pin_code').catch((err) => {
-    console.log(`  pin_code skipped: ${err.message}`);
-  });
+  await fillPinCodeSearch(page, 'pin_code');
   await fillIfVisible(page, 'address', `12 Test Street ${suffix}`);
   await fillIfVisible(page, 'customer_notes', `Full lead details filled by automation ${suffix}`);
   await selectIfVisible(page, 'reason_for_selling', { onlyIfEmpty: keepExistingCustomer });
@@ -220,7 +208,7 @@ async function fillAllLeadDetails(page, { stamp, keepExistingCustomer = false } 
   console.log('→ Purchase Master: fill vehicle details');
   const vehicleSource = await selectIfVisible(page, 'source_other');
   console.log(`  Vehicle Source: ${vehicleSource || '(hidden)'}`);
-  await selectIfVisible(page, 'park_and_sell');
+  await selectIfVisible(page, 'park_and_sell', { onlyIfEmpty: true });
 
   const regType = await selectIfVisible(page, 'reg_type', { exclude: [/unregistered/i] });
   console.log(`  Registration Type: ${regType || '(hidden)'}`);
@@ -279,9 +267,7 @@ async function fillAllLeadDetails(page, { stamp, keepExistingCustomer = false } 
   await selectIfVisible(page, 'insurance_type');
   if (await pickDateIfVisible(page, 'insurance_exp_date')) console.log('  Insurance expiry: picked');
   if (await pickDateIfVisible(page, 'third_party_insurance_exp_date')) console.log('  Third-party expiry: picked');
-  await fillPinCodeSearch(page, 'rc_pin_code').catch((err) => {
-    console.log(`  rc_pin_code skipped: ${err.message}`);
-  });
+  await fillPinCodeSearch(page, 'rc_pin_code');
   await fillIfVisible(page, 'rc_address', `RC Address ${suffix}`);
 
   await fillVisibleDependents(page, { stamp: suffix });

@@ -61,7 +61,7 @@ After login, in the **same** session, add a Purchase Master lead.
 Fill every field, including the custom components from the DMS codebase:
 - SelectSearch dropdowns (Source, Sub Source, Make, Model, Variant, colors, Branch, Executive, …)
 - DateTimePicker
-- pin_code_search (type 3–6 digits, wait for the area dropdown, pick an option)
+- pin_code_search: type the 6-digit pin, wait for `getareasbypincode` (full pin, not the 3-digit prefix), pick a numeric area id, wait for `getstatecitybyarea`, then confirm read-only Area / City / State. A typed pin alone is not filled.
 - Vaahan / Verify addons when visible
 
 Write **all add-lead test cases, including negatives**. Do **not** include edit in the add suite.

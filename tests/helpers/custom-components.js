@@ -29,7 +29,9 @@ async function isVisible(locator) {
 
 function isPlaceholderLabel(text) {
   const t = String(text || '').trim();
-  return !t || /^select\s/i.test(t);
+  return !t
+    || /^select\s/i.test(t)
+    || /^(reason|area|city|state|make \(interested\)|model \(interested\)|variant \(interested\))$/i.test(t);
 }
 
 function matchesExclude(text, exclude = []) {
@@ -122,8 +124,15 @@ async function countRealDomOptions(opened) {
 async function waitForRealOptions(page, fieldId, timeout = 25000) {
   const wrapper = selectWrapper(page, fieldId);
   await expect(wrapper).toBeVisible({ timeout });
-  const fromVue = await countRealSelectOptions(wrapper).catch(() => -1);
-  if (fromVue > 0) return;
+  if (!(await isSelectUnset(page, fieldId))) return;
+  try {
+    await expect.poll(async () => countRealSelectOptions(wrapper), {
+      timeout: Math.min(timeout, 8000),
+    }).toBeGreaterThan(0);
+    return;
+  } catch {
+    // Options often land on the instance only after the menu is open.
+  }
   const opened = await openSelectSearch(page, fieldId);
   try {
     await expect.poll(async () => countRealDomOptions(opened), {
@@ -326,7 +335,7 @@ async function waitForColorList(page, fieldId = 'color', timeout = 30000) {
   }
 }
 
-async function selectColorAfterMake(page, fieldId = 'color') {
+async function selectColorAfterMake(page, fieldId = 'color', opts = {}) {
   const wrapper = selectWrapper(page, fieldId);
   if (fieldId === 'interior_color' && !(await isVisible(wrapper))) {
     console.log('  interior_color: hidden (only shown for JLR makes)');
@@ -337,6 +346,9 @@ async function selectColorAfterMake(page, fieldId = 'color') {
   } catch {
     console.log(`  ${fieldId}: hidden (needs Registration Type, then Make)`);
     return null;
+  }
+  if (opts.onlyIfEmpty && !(await isSelectUnset(page, fieldId))) {
+    return currentSelectLabel(page, fieldId);
   }
   const ready = await waitForColorList(page, fieldId).catch((err) => {
     console.log(`  ${fieldId}: ${err.message}`);
@@ -349,35 +361,268 @@ async function selectColorAfterMake(page, fieldId = 'color') {
 /**
  * pin_code_search is SelectSearch with inputType="input".
  * Typing 3–6 digits calls store.dynamic_location_search → getareasbypincode.
- * Picking an option emits change → store.dynamic_location.
+ * Picking an option emits change → store.dynamic_location → getstatecitybyarea,
+ * which writes the read-only Area / City / State fields. Those cannot be typed.
  */
 const PIN_CODE_POOL = ['400001', '110001', '560001', '600001', '700001', '411001', '302001', '500001'];
 
-async function fillPinCodeSearch(page, fieldId, pin) {
+function pinCodeDependents(fieldId) {
+  if (fieldId === 'rc_pin_code') {
+    return { area: 'rc_area_name', city: 'rc_city_name', state: 'rc_state_name' };
+  }
+  if (fieldId === 'customer_pin_code') {
+    return { area: 'customer_area_name', city: 'customer_city_name', state: 'customer_state_name' };
+  }
+  if (fieldId === 'billing_pin_code') {
+    return { area: 'billing_area_name', city: 'billing_city_name', state: 'billing_state_name' };
+  }
+  return { area: 'area_name', city: 'city_name', state: 'state_name' };
+}
+
+function isLocationEmpty(value) {
+  const t = String(value || '').trim();
+  return !t || /^(area|city|state)$/i.test(t);
+}
+
+function isMasterDataPost(response) {
+  return response.request().method() === 'POST' && /master-data/i.test(response.url());
+}
+
+async function masterDataMeta(response) {
+  const req = response.request();
+  let raw = '';
+  try {
+    raw = req.postData() || '';
+  } catch {
+    raw = '';
+  }
+  let json = null;
+  try {
+    json = req.postDataJSON();
+  } catch {
+    json = null;
+  }
+  const body = await response.json().catch(() => null);
+  const msg = String(body?.msg || '');
+  const action = String(json?.action || '').toLowerCase()
+    || ((/getareasbypincode/i.test(raw) && 'getareasbypincode')
+      || (/getstatecitybyarea/i.test(raw) && 'getstatecitybyarea')
+      || (/areas list|empty areas list/i.test(msg) && 'getareasbypincode')
+      || (/from area/i.test(msg) && 'getstatecitybyarea')
+      || '');
+  const pinFromRaw = (String(raw).match(/pin_code["'=\s:]+(\d{3,6})/i) || [])[1] || '';
+  const areaFromRaw = (String(raw).match(/["']?area["'=\s:]+(\d+)/i) || [])[1] || '';
+  return {
+    action,
+    pin: String(json?.pin_code || pinFromRaw || ''),
+    area: String(json?.area || areaFromRaw || ''),
+    body,
+    msg,
+  };
+}
+
+function isAreasByPincodeMeta(meta) {
+  return meta.action === 'getareasbypincode' || /areas list|empty areas list/i.test(meta.msg);
+}
+
+function isStateCityByAreaMeta(meta) {
+  return meta.action === 'getstatecitybyarea' || /from area/i.test(meta.msg);
+}
+
+async function waitForFinalAreasByPincode(page, pin, timeout = 20000) {
+  const deadline = Date.now() + timeout;
+  let last = null;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const quietMs = last ? 1500 : Math.min(8000, remaining);
+    const res = await page.waitForResponse(async (response) => {
+      if (!isMasterDataPost(response)) return false;
+      const meta = await masterDataMeta(response);
+      if (!isAreasByPincodeMeta(meta)) return false;
+      if (pin && meta.pin && meta.pin !== String(pin)) return false;
+      return true;
+    }, { timeout: quietMs }).catch(() => null);
+    if (res) {
+      last = await masterDataMeta(res);
+      continue;
+    }
+    if (last) return last;
+  }
+  return last;
+}
+
+async function waitForStateCityByArea(page, timeout = 20000) {
+  const res = await page.waitForResponse(async (response) => {
+    if (!isMasterDataPost(response)) return false;
+    return isStateCityByAreaMeta(await masterDataMeta(response));
+  }, { timeout }).catch(() => null);
+  return res ? masterDataMeta(res) : null;
+}
+
+async function storeAreaOptions(page, fieldId) {
+  return page.evaluate((id) => {
+    const app = document.querySelector('#app')?.__vue_app__;
+    const pinia = app?.config?.globalProperties?.$pinia;
+    const store = pinia?._s?.get('pm');
+    const list = store?.masterLists?.[id];
+    if (!Array.isArray(list)) return [];
+    return list
+      .map((o) => ({ value: String(o?.value ?? ''), label: String(o?.label ?? '') }))
+      .filter((o) => o.value && o.value !== '0' && /^\d+$/.test(o.value));
+  }, fieldId);
+}
+
+async function applyPinAndAreaViaStore(page, fieldId, pin, areaId) {
+  return page.evaluate(async ({ fieldId: id, pin: zip, areaId: area }) => {
+    const app = document.querySelector('#app')?.__vue_app__;
+    const pinia = app?.config?.globalProperties?.$pinia;
+    const store = pinia?._s?.get('pm');
+    if (!store) return { ok: false, error: 'pm store missing' };
+    const configKey = 'detailAddConfig';
+    const fields = typeof store.getAllFields === 'function'
+      ? store.getAllFields(store[configKey] || {})
+      : [];
+    const field = (fields || []).find((f) => f.fieldKey === id);
+    if (!field) return { ok: false, error: `${id} field missing` };
+    if (zip && typeof store.dynamic_location_search === 'function') {
+      await store.dynamic_location_search(String(zip), field, configKey);
+    }
+    const list = Array.isArray(store.masterLists?.[id]) ? store.masterLists[id] : [];
+    const picked = area
+      || String(list.find((o) => o && o.value && String(o.value) !== '0')?.value || '');
+    if (!picked || !/^\d+$/.test(String(picked))) {
+      return { ok: false, error: 'no numeric area id', count: list.length };
+    }
+    if (typeof store.dynamic_location === 'function') {
+      await store.dynamic_location(String(picked), field, configKey);
+    }
+    return { ok: true, area: String(picked) };
+  }, { fieldId, pin, areaId });
+}
+
+async function locationFieldsFilled(page, fieldId) {
+  const deps = pinCodeDependents(fieldId);
+  const values = {};
+  for (const [key, id] of Object.entries(deps)) {
+    const el = page.locator(`#${id}`).first();
+    if (!(await isVisible(el))) {
+      values[key] = '';
+      continue;
+    }
+    values[key] = (await el.inputValue().catch(() => '')).trim();
+  }
+  const visibleDeps = [];
+  for (const id of Object.values(deps)) {
+    if (await isVisible(page.locator(`#${id}`).first())) visibleDeps.push(id);
+  }
+  if (!visibleDeps.length) return { ok: true, values };
+  const ok = !isLocationEmpty(values.area)
+    && !isLocationEmpty(values.city)
+    && !isLocationEmpty(values.state);
+  return { ok, values };
+}
+
+async function fillOnePinCodeSearch(page, fieldId, chosenPin) {
   const wrapper = selectWrapper(page, fieldId);
-  if (!(await isVisible(wrapper))) return false;
-  if (await isDisabledSelect(wrapper)) return false;
-  const chosenPin = String(pin || PIN_CODE_POOL[randomInt(PIN_CODE_POOL.length)]);
   await wrapper.scrollIntoViewIfNeeded();
   const input = wrapper.locator('input.border-0.w-100');
   await expect(input).toBeVisible({ timeout: 10000 });
   await input.click();
   await input.fill('');
-  await input.pressSequentially(chosenPin, { delay: 60 });
-  await page.waitForLoadState('networkidle').catch(() => {});
+
+  const prefix = chosenPin.slice(0, -1);
+  const lastDigit = chosenPin.slice(-1);
+  if (prefix) await input.pressSequentially(prefix, { delay: 50 });
+  const areasWait = waitForFinalAreasByPincode(page, chosenPin);
+  await input.pressSequentially(lastDigit, { delay: 50 });
+  await expect.poll(async () => input.inputValue(), { timeout: 5000 }).toBe(chosenPin);
+  const areasMeta = await areasWait;
+
   await wrapper.evaluate((el) => el.__vueSelectSearch?.toggleDropdown(true));
   const dropdown = wrapper.locator('.selectsearch-dropdown');
   await expect(dropdown).toBeVisible({ timeout: 15000 });
   const items = optionItems(dropdown);
-  await expect.poll(async () => items.count(), { timeout: 15000 }).toBeGreaterThan(0);
-  const n = await items.count();
-  const picked = items.nth(randomInt(n));
-  const label = (await picked.innerText()).trim();
-  await picked.click();
+
+  await expect.poll(async () => {
+    const fromStore = await storeAreaOptions(page, fieldId);
+    if (fromStore.length) return fromStore.length;
+    const texts = await items.allInnerTexts().catch(() => []);
+    return texts.filter((t) => t.trim() && !/^select\s/i.test(t.trim())).length;
+  }, { timeout: 20000, message: `getareasbypincode returned no areas for ${chosenPin}` }).toBeGreaterThan(0);
+
+  let lastCount = -1;
+  for (let i = 0; i < 10; i++) {
+    const n = await items.count();
+    if (n > 0 && n === lastCount) break;
+    lastCount = n;
+    await page.waitForTimeout(200);
+  }
+
+  const apiList = Array.isArray(areasMeta?.body?.data?.list) ? areasMeta.body.data.list : [];
+  const storeList = await storeAreaOptions(page, fieldId);
+  const options = (storeList.length ? storeList : apiList)
+    .map((o) => ({ value: String(o?.value ?? ''), label: String(o?.label ?? '') }))
+    .filter((o) => o.value && o.value !== '0' && /^\d+$/.test(o.value));
+  if (!options.length) {
+    throw new Error(`getareasbypincode returned no numeric areas for ${chosenPin}`);
+  }
+  const choice = options[randomInt(options.length)];
+
+  const cityWait = waitForStateCityByArea(page);
+  const selected = await wrapper.evaluate((el, payload) => {
+    const cmp = el.__vueSelectSearch;
+    if (!cmp?.selectItem) return false;
+    cmp.selectItem({ value: payload.value, label: payload.label });
+    return true;
+  }, choice);
+  if (!selected) {
+    const byLabel = items.filter({ hasText: choice.label }).first();
+    if (await byLabel.count()) await byLabel.click();
+    else await items.first().click();
+  }
   await expect(dropdown).toBeHidden({ timeout: 8000 }).catch(() => {});
-  await page.waitForLoadState('networkidle').catch(() => {});
-  console.log(`  ${fieldId}: ${chosenPin} → ${label}`);
+  await cityWait;
+
+  let filled = await locationFieldsFilled(page, fieldId);
+  if (!filled.ok) {
+    const fallback = await applyPinAndAreaViaStore(page, fieldId, chosenPin, choice.value);
+    if (!fallback.ok) {
+      console.log(`  ${fieldId}: store getstatecitybyarea fallback failed (${fallback.error || 'unknown'})`);
+    }
+    await expect.poll(async () => (await locationFieldsFilled(page, fieldId)).ok, {
+      timeout: 15000,
+      message: `getstatecitybyarea did not fill Area/City/State after ${chosenPin} → ${choice.label}`,
+    }).toBeTruthy();
+    filled = await locationFieldsFilled(page, fieldId);
+  }
+
+  console.log(`  ${fieldId}: ${chosenPin} → ${choice.label} (${filled.values.area} / ${filled.values.city} / ${filled.values.state})`);
   return true;
+}
+
+async function fillPinCodeSearch(page, fieldId, pin) {
+  const wrapper = selectWrapper(page, fieldId);
+  if (!(await isVisible(wrapper))) return false;
+  if (await isDisabledSelect(wrapper)) return false;
+
+  const already = await locationFieldsFilled(page, fieldId);
+  if (already.ok && already.values.city) return true;
+
+  const pins = pin
+    ? [String(pin)]
+    : PIN_CODE_POOL.slice().sort(() => Math.random() - 0.5);
+  let lastError = null;
+  for (const chosenPin of pins) {
+    try {
+      await fillOnePinCodeSearch(page, fieldId, chosenPin);
+      return true;
+    } catch (err) {
+      lastError = err;
+      console.log(`  ${fieldId} ${chosenPin} did not fill Area/City/State — trying another pincode`);
+    }
+  }
+  throw lastError || new Error(`Could not fill Area/City/State from ${fieldId}`);
 }
 
 async function pickDateInWrapper(wrap) {
@@ -462,16 +707,13 @@ async function fillRemainingCustomFields(page) {
     const id = await wrapper.getAttribute('id');
     if (!id) continue;
     if (await isInputMode(wrapper)) {
-      const val = await wrapper.locator('input.border-0.w-100').inputValue().catch(() => '');
-      if (!val) {
-        await fillPinCodeSearch(page, id).catch((err) => {
-          console.log(`  leftover pin_code_search #${id}: ${err.message}`);
-        });
+      const filled = await locationFieldsFilled(page, id);
+      if (!filled.ok) {
+        await fillPinCodeSearch(page, id);
       }
       continue;
     }
-    const label = await currentSelectLabel(page, id);
-    if (isPlaceholderLabel(label)) {
+    if (await isSelectUnset(page, id)) {
       const picked = await selectIfVisible(page, id);
       if (picked) console.log(`  leftover SelectSearch #${id}: ${picked}`);
     }
