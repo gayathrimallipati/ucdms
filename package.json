@@ -1,0 +1,23 @@
+{
+  "name": "dms-login-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright agent that logs into dms.jlr.local (email, captcha, OTP)",
+  "scripts": {
+    "postinstall": "npx playwright install chromium",
+    "login": "node login-agent.js",
+    "test": "node tests/run-login-scenarios.js",
+    "test:add": "node tests/run-add-lead.js",
+    "test:edit": "node tests/run-edit-lead.js",
+    "test:stock": "node tests/run-stock.js",
+    "test:flow": "node tests/run-flow.js",
+    "test:report": "npx playwright test",
+    "report": "npx playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  },
+  "dependencies": {
+    "tesseract.js": "^7.0.0"
+  }
+}
