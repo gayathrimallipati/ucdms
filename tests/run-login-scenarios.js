@@ -19,6 +19,7 @@
 
 const { launchBrowser, newAppContext } = require('./helpers/browser');
 const { runLoginScenarios } = require('./helpers/scenarios');
+const { createRunReport } = require('./helpers/run-report');
 
 async function main() {
   console.log('[agent] Opening one browser window…');
@@ -26,8 +27,16 @@ async function main() {
   const context = await newAppContext(browser);
   const page = await context.newPage();
 
+  const report = createRunReport('npm test');
   console.log('[agent] Checking all scenarios in this one window (no reload between cases)');
-  const failures = await runLoginScenarios(page);
+  let failures = [];
+  try {
+    failures = await runLoginScenarios(page, null, report);
+  } catch (err) {
+    report.fail('Run aborted', err);
+    failures = [`Run aborted: ${err.message}`];
+  }
+  report.finish();
 
   if (failures.length) {
     console.error(`\n[agent] ${failures.length} scenario(s) failed:\n${failures.join('\n')}`);
@@ -46,5 +55,10 @@ async function main() {
 
 main().catch((err) => {
   console.error('[agent] Failed:', err.message);
+  try {
+    const report = createRunReport('npm test');
+    report.fail('Run aborted', err);
+    report.finish();
+  } catch { /* ignore */ }
   process.exitCode = 1;
 });

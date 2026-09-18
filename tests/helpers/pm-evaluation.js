@@ -29,6 +29,73 @@ function skipImagesOnLocalDms(page) {
   return host === 'dms.jlr.local' || host.endsWith('.dms.jlr.local');
 }
 
+const PM_STATUS = {
+  1: 'Fresh',
+  2: 'Follow up',
+  3: 'Deal Done',
+  4: 'Purchased',
+  5: 'Lost',
+};
+
+function labelFromStatusId(id, name) {
+  const n = String(name || '');
+  if (id === '4' || /purchas/i.test(n)) return 'Purchased';
+  if (id === '3' || /deal\s*done/i.test(n)) return 'Deal Done';
+  if (id === '5' || /lost/i.test(n)) return 'Lost';
+  if (id === '2' || /follow/i.test(n)) return 'Follow up';
+  if (id === '1' || /fresh/i.test(n)) return 'Fresh';
+  return PM_STATUS[id] || n;
+}
+
+/** Real PM status from getlead (`store.detail.status`), not the Status dropdown. */
+async function vuePmDetail(page) {
+  return page.evaluate(() => {
+    const pick = (proxy) => {
+      const store = proxy?.store;
+      const detail = store?.detail;
+      if (!detail || detail.status == null || String(detail.status) === '') return null;
+      return {
+        status: String(detail.status),
+        status_name: String(detail.status_name || ''),
+        processing: Boolean(store.isProcessing),
+      };
+    };
+    let node = document.querySelector('#status');
+    while (node) {
+      const found = pick(node.__vueParentComponent?.proxy);
+      if (found) return found;
+      node = node.parentElement;
+    }
+    for (const el of document.querySelectorAll('*')) {
+      const found = pick(el.__vueParentComponent?.proxy);
+      if (found) return found;
+    }
+    return null;
+  }).catch(() => null);
+}
+
+async function leadStatusFromApp(page) {
+  const detail = await vuePmDetail(page);
+  const fromStore = labelFromStatusId(detail?.status, detail?.status_name);
+  if (fromStore) return fromStore;
+  const badge = await page.locator('.badge, [class*="status"]').filter({
+    hasText: /^(Fresh|Follow up|Deal Done|Purchased|Lost)$/i,
+  }).first().innerText().catch(() => '');
+  if (badge) return labelFromStatusId('', badge);
+  return (await currentSelectLabel(page, 'status')) || '';
+}
+
+async function waitForLeadStatus(page, expected, timeoutMs = 20000) {
+  const want = Array.isArray(expected) ? expected : [expected];
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const now = await leadStatusFromApp(page);
+    if (want.some((label) => statusMatches(now, label))) return now;
+    await page.waitForTimeout(250);
+  }
+  return leadStatusFromApp(page);
+}
+
 async function openDetailTab(page, label) {
   await dismissAppModals(page);
   const tab = page.locator('#sidebar-menu-list a, .sidebar-container a, .sidebar-mobile-tabs a')
@@ -143,6 +210,46 @@ const STATUS_PRICING = {
   price_selling: 900000,
 };
 
+function flattenApiErrors(errors) {
+  if (!errors) return [];
+  if (Array.isArray(errors)) return errors.flat().map((e) => String(e).trim()).filter(Boolean);
+  if (typeof errors === 'object') return Object.values(errors).flat().map((e) => String(e).trim()).filter(Boolean);
+  return [String(errors)];
+}
+
+/**
+ * UAT/stage wrap purchase-master JSON in AES (`data.iv` + `data.payload`).
+ * Playwright sees HTTP 200 with no `status: ok`, which is not a rejection —
+ * `$http` decrypts it in the page. Only treat an explicit fail/error as failed.
+ */
+function classifyApiJson(response, body) {
+  const http = response.status();
+  if (http === 429) {
+    return { kind: 'fail', ok: false, retry: true, status: http, msg: 'rate limited (HTTP 429)', errors: [] };
+  }
+  if (!body || typeof body !== 'object') {
+    return { kind: 'unknown', ok: null, status: http, msg: '', errors: [] };
+  }
+  const status = String(body.status || '').toLowerCase();
+  const msg = String(body.msg || '');
+  const errors = flattenApiErrors(body.errors);
+  if (status === 'ok') return { kind: 'ok', ok: true, status: http, msg, errors };
+  if (status === 'fail' || status === 'error') {
+    return { kind: 'fail', ok: false, retry: false, status: http, msg, errors };
+  }
+  if (body.data && (body.data.payload || body.data.iv) && !status) {
+    return { kind: 'encrypted', ok: null, status: http, msg: '', errors: [] };
+  }
+  if (http !== 200) {
+    return { kind: 'fail', ok: false, retry: false, status: http, msg: msg || `HTTP ${http}`, errors };
+  }
+  return { kind: 'unknown', ok: null, status: http, msg, errors };
+}
+
+function statusMatches(label, target) {
+  return new RegExp(String(target).replace(/\s+/g, '\\s*'), 'i').test(String(label || ''));
+}
+
 function watchStatusResponses(page) {
   const events = [];
   const handler = async (response) => {
@@ -165,21 +272,21 @@ function watchStatusResponses(page) {
     if (!looksLikeStatus) return;
 
     const body = await response.json().catch(() => null);
-    if (!body) return;
-    const msg = String(body.msg || '');
+    const classified = classifyApiJson(response, body);
+    if (classified.kind === 'encrypted' || classified.kind === 'unknown') return;
+    const msg = classified.msg;
     if (/image/i.test(msg) && /upload/i.test(msg)) return;
-    const raw = body.errors && typeof body.errors === 'object' ? Object.values(body.errors) : [];
     events.push({
-      ok: response.status() === 200 && body.status === 'ok',
+      ok: classified.ok === true,
       msg,
-      errors: raw.flat().map((e) => String(e).trim()).filter(Boolean),
+      errors: classified.errors,
     });
   };
   page.on('response', handler);
   return { events, dispose: () => page.off('response', handler) };
 }
 
-async function trySubmitStatus(page, watcher) {
+async function trySubmitStatus(page, watcher, target) {
   const seen = watcher.events.length;
   const update = page.locator('form button.btn-dark').filter({ hasText: /update/i })
     .or(page.getByRole('button', { name: /update/i }))
@@ -192,13 +299,22 @@ async function trySubmitStatus(page, watcher) {
     .then(() => confirm.first().click()).catch(() => {});
 
   const successToast = toast(page).filter({ hasText: /Updated successfully|Status updated successfully/i });
+  const failToast = toast(page).filter({
+    hasText: /Validation failed|complete the evaluation|mandatory image|required when moving|Token Amount is required/i,
+  });
   const deadline = Date.now() + 45000;
   while (Date.now() < deadline) {
+    // Do not trust the dropdown alone — it already shows `target` after selectAndFillStatus.
+    if (await successToast.isVisible().catch(() => false)) return { ok: true, errors: [] };
+
     const fresh = watcher.events.slice(seen);
     if (fresh.some((e) => e.ok)) return { ok: true, errors: [] };
-    const failed = fresh.find((e) => !e.ok);
+    const failed = fresh.find((e) => !e.ok && (e.errors.length || e.msg));
     if (failed) return { ok: false, errors: failed.errors.length ? failed.errors : [failed.msg] };
-    if (await successToast.isVisible().catch(() => false)) return { ok: true, errors: [] };
+
+    const failText = (await failToast.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+    if (failText) return { ok: false, errors: [failText] };
+
     const inline = (await page.locator('.invalid-feedback.d-block').allInnerTexts().catch(() => []))
       .map((t) => t.trim()).filter(Boolean);
     if (inline.length) return { ok: false, errors: inline };
@@ -206,7 +322,8 @@ async function trySubmitStatus(page, watcher) {
   }
   const inline = (await page.locator('.invalid-feedback.d-block').allInnerTexts().catch(() => []))
     .map((t) => t.trim()).filter(Boolean);
-  return { ok: false, errors: inline };
+  const now = (await currentSelectLabel(page, 'status')) || '';
+  return { ok: false, errors: inline.length ? inline : [`No status-update confirmation (Status of Lead: ${now || 'unset'})`] };
 }
 
 async function attachStatusDoc(page, fieldId) {
@@ -247,19 +364,19 @@ async function fillStatusRequirements(page, target) {
   const isPurchased = /purchas/i.test(target);
 
   if (await selectWrapper(page, 'sub_status').isVisible().catch(() => false)) {
-    if (await isSelectUnset(page, 'sub_status')) {
-      await selectIfVisible(page, 'sub_status', isDealDone
-        ? { label: 'Token Paid', search: 'Token' }
-        : {});
+    if (isDealDone) {
+      await selectIfVisible(page, 'sub_status', { label: 'Token Paid', search: 'Token', noFallback: true });
+    } else if (await isSelectUnset(page, 'sub_status')) {
+      await selectIfVisible(page, 'sub_status', {});
     }
   }
 
   await selectIfVisible(page, 'lead_classification', { label: 'Hot', search: 'Hot', onlyIfEmpty: true });
-  await fillIfVisible(page, 'remarks', `Lead moved to ${target} by automation after evaluation.`, { onlyIfEmpty: true });
+  await fillIfVisible(page, 'remarks', `Lead moved to ${target} by automation after evaluation.`);
   await pickDateIfVisible(page, 'followup_date').catch(() => {});
 
   for (const [field, value] of Object.entries(STATUS_PRICING)) {
-    await fillIfVisible(page, field, value, { onlyIfEmpty: true });
+    await fillIfVisible(page, field, value);
   }
 
   if (isPurchased) {
@@ -307,9 +424,10 @@ async function moveStatusTo(page, target, watcher) {
   }
 
   if (!(await selectAndFillStatus(page, target))) return false;
-  const result = await trySubmitStatus(page, watcher);
+  const result = await trySubmitStatus(page, watcher, target);
   if (result.ok) {
     console.log(`  Status of Lead → ${target}`);
+    await page.waitForTimeout(500);
     return true;
   }
 
@@ -317,7 +435,7 @@ async function moveStatusTo(page, target, watcher) {
     console.log(`  Purchased refused for missing images — uploading and retrying`);
     const images = await ensureMandatoryImagesForPurchase(page);
     if (images.ready && await selectAndFillStatus(page, target)) {
-      const retry = await trySubmitStatus(page, watcher);
+      const retry = await trySubmitStatus(page, watcher, target);
       if (retry.ok) {
         console.log(`  Status of Lead → ${target}`);
         return true;
@@ -337,7 +455,7 @@ async function advanceLeadStatusToPurchased(page) {
   try {
     for (let step = 0; step < 4; step++) {
       await openDetailTab(page, 'STATUS');
-      const current = (await currentSelectLabel(page, 'status')) || '';
+      const current = await leadStatusFromApp(page);
       if (/purchas/i.test(current)) {
         console.log('  Status of Lead is Purchased');
         return 'Purchased';
@@ -351,9 +469,19 @@ async function advanceLeadStatusToPurchased(page) {
         ? 'Purchased'
         : (/follow\s*up/i.test(current) ? 'Deal Done' : 'Follow up');
       console.log(`→ Purchase Master: move status ${current || '(unset)'} → ${target}`);
-      if (!(await moveStatusTo(page, target, watcher))) return current;
+      const moved = await moveStatusTo(page, target, watcher);
+      const actual = await waitForLeadStatus(page, moved ? target : ['Purchased', target], 20000);
+      if (/purchas/i.test(actual)) {
+        console.log('  Status of Lead is Purchased');
+        return 'Purchased';
+      }
+      if (!moved) return actual || current;
+      if (!statusMatches(actual, target)) {
+        console.log(`  After UPDATE, getlead status is ${actual || '(unknown)'} (dropdown may still show the previous step)`);
+        return actual || current;
+      }
     }
-    return (await currentSelectLabel(page, 'status')) || '';
+    return await leadStatusFromApp(page);
   } finally {
     watcher.dispose();
   }
@@ -751,10 +879,13 @@ function watchUploadResponses(page) {
   const handler = async (response) => {
     if (!isUploadRequest(response.request())) return;
     const body = await response.json().catch(() => null);
+    const classified = classifyApiJson(response, body);
+    if (classified.kind === 'encrypted' || classified.kind === 'unknown') return;
     events.push({
-      ok: response.status() === 200 && body?.status === 'ok',
-      status: response.status(),
-      msg: body?.msg || '',
+      ok: classified.ok === true,
+      status: classified.status,
+      msg: classified.msg,
+      retry: classified.retry,
     });
   };
   page.on('response', handler);
@@ -974,7 +1105,7 @@ async function ensureMandatoryImagesForPurchase(page) {
 async function runStatusEvaluationAndImages(page) {
   console.log('→ Purchase Master: open STATUS and update the lead');
   await openDetailTab(page, 'STATUS');
-  const current = (await currentSelectLabel(page, 'status')) || '';
+  const current = await leadStatusFromApp(page);
   console.log(`  Current Status of Lead: ${current || '(empty)'}`);
 
   if (/purchas/i.test(current)) {
@@ -1016,12 +1147,30 @@ async function runStatusEvaluationAndImages(page) {
   }
 
   const finalStatus = await advanceLeadStatusToPurchased(page);
-  return {
-    inEvaluation,
-    evaluationSkipped: evaluation.skipped,
-    imagesSkipped: skipImagesOnLocalDms(page),
-    finalStatus,
-  };
+  const confirmed = /purchas/i.test(finalStatus || '')
+    ? 'Purchased'
+    : await waitForLeadStatus(page, 'Purchased', 8000);
+  if (/purchas/i.test(confirmed || '')) {
+    return {
+      inEvaluation,
+      evaluationSkipped: evaluation.skipped,
+      imagesSkipped: skipImagesOnLocalDms(page),
+      finalStatus: 'Purchased',
+    };
+  }
+  if (skipImagesOnLocalDms(page) && /deal\s*done/i.test(finalStatus || confirmed || '')) {
+    console.log('  dms.jlr.local cannot save Images-tab photos — Status of Lead stops at Deal Done');
+    return {
+      inEvaluation,
+      evaluationSkipped: evaluation.skipped,
+      imagesSkipped: true,
+      finalStatus: finalStatus || confirmed,
+    };
+  }
+  throw new Error(
+    `Status of Lead stopped at "${confirmed || finalStatus || 'unknown'}" instead of Purchased.`
+    + ' Walk Follow up → Deal Done → Purchased one step at a time after evaluation_done = y and mandatory images.'
+  );
 }
 
 module.exports = {

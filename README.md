@@ -51,7 +51,7 @@ DMS_HEADLESS=0
 | --- | --- |
 | `DMS_URL` | DMS origin. Changing local / stage / UAT forces a new captcha + OTP login. |
 | `DMS_EMAIL` | Dealer email |
-| `DMS_OTP` | Login OTP. Local/DEV default `919919`. UAT is typically `369369`. |
+| `DMS_OTP` | Local/DEV OTP default `919919`. Ignored on UAT — that host always uses `369369`. |
 | `DMS_BROWSER` | `chrome`, `msedge`, or `chromium`. Leave empty to try Chrome, then Edge, then Chromium. |
 | `DMS_HEADLESS` | `0` = visible window (needed for edit/stock pickers). `1` = headless. |
 | `DMS_PHOTOS_DIR` | Optional folders of `.jpg` / `.png` for Images-tab uploads. Leave empty to use `tests/fixtures/vehicle-photos` or generated PNGs. |
@@ -59,7 +59,7 @@ DMS_HEADLESS=0
 
 Images still upload if `.env` has no photo folders. Place files under `tests/fixtures/vehicle-photos` or let the suite generate PNGs.
 
-A missing `.env` is allowed: the scripts fall back to `https://dms.jlr.local`, `dealer@cartrade.com`, and OTP `919919`. You still need `.env` when the URL, email, or OTP is different on that machine.
+A missing `.env` is allowed: the scripts fall back to `https://dms.jlr.local`, `dealer@cartrade.com`, and OTP `919919`. On `uat.ucdms.in` the OTP is always `369369`. You still need `.env` when the URL or email is different on that machine.
 
 ## Run
 
@@ -72,11 +72,28 @@ Keep the browser window open. Do not close it until the script prints that it is
 | `npm run test:edit` | Edit only. **You pick the lead** in the Chrome overlay. |
 | `npm run test:stock` | My Stock only. **You pick the INV ID** in the Chrome overlay. |
 | `npm run test:flow` | One window: add → edit (pick the new PM ID) → stock (pick the INV) through Ready For Sale. |
+| `npm run report` | Re-open the last HTML report (`test-results/reports/latest.html`). |
 
 ```bash
 npm run test:add
 npm run test:flow
 ```
+
+### Report
+
+Every script (`npm test`, `test:add`, `test:edit`, `test:stock`, `test:flow`, `npm run login`) writes an HTML report when it finishes and opens it in the browser:
+
+- Latest: `test-results/reports/latest.html`
+- Timestamped copy in the same folder
+- Failed screenshots linked from the report (`test-results/failed-cases/`)
+
+Re-open the last report:
+
+```bash
+npm run report
+```
+
+Set `DMS_OPEN_REPORT=0` if you do not want the report window to open automatically.
 
 ### Edit / stock / flow pickers
 
@@ -87,7 +104,7 @@ On `test:flow`, the add step prints the new Lead ID. Pick that same ID in edit, 
 ### Login and sessions
 
 - First run (or after the session expires): complete captcha + OTP in the opened Chrome window if the script cannot do it automatically.
-- DEV captcha is read from the login API. UAT/stage captcha is read from the image (refresh on failure).
+- DEV captcha is `data_optional.captcha_code`. UAT/stage omit that field — login reads `captcha_token`, JWT-decodes it, and `data_decrypt`s with the DMS encryption keys (`DMS_CONFIG_PHP` or `docker/projects/config.php`).
 - Saved session: `test-results/auth/dealer.json`. It is reused only when it belongs to the **current** `DMS_URL` host. Switching environment always logs in again.
 - `npm test` starts from a clean login page and does not reuse that file.
 
@@ -102,7 +119,7 @@ On `test:flow`, the add step prints the new Lead ID. Pick that same ID in edit, 
 ## Troubleshooting
 
 - **Wrong site / unexpected login** — `DMS_URL` host does not match the saved session. That is expected after changing local → stage → UAT. Log in once; the new session is saved.
-- **Captcha loop on UAT/stage** — the image is OCR’d; wait for a few refresh attempts. Confirm `DMS_OTP` is the OTP for that environment.
+- **Captcha loop on UAT/stage** — the host must use the same `encryption` keys as `docker/projects/config.php` (or set `DMS_CONFIG_PHP` / `DMS_DATA_SECRET_KEY`). Confirm `DMS_OTP` for that environment (`369369` on UAT).
 - **“Chassis is required” / no VIN** — Jaguar/Land Rover add needs a 17-character VIN starting with `SA` from `master_jlr_total_vins`. Stage may not expose `getJlrVin`; the helper also tries other VIN list APIs. Optional override: `DMS_VIN=SA…` (17 chars).
 - **Area / City / State empty** — pincode is not enough. The add flow waits for `getareasbypincode`, picks an area, then waits for `getstatecitybyarea`.
 - **Images 429 on stage** — increase `DMS_UPLOAD_DELAY_MS` (for example `3000`). Uploads are skipped on `dms.jlr.local`.

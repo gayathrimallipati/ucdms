@@ -12,7 +12,7 @@
     "test:stock": "node tests/run-stock.js",
     "test:flow": "node tests/run-flow.js",
     "test:report": "npx playwright test",
-    "report": "npx playwright show-report"
+    "report": "node -e \"require('./tests/helpers/run-report').openLatest()\""
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0"

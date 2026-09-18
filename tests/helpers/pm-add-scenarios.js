@@ -70,17 +70,21 @@ async function fillRequiredCustomer(page) {
   await fillIfVisible(page, 'mobile', `9${Date.now().toString().slice(-9)}`);
 }
 
-async function runPmAddScenarios(page, testInfo) {
+async function runPmAddScenarios(page, testInfo, report) {
   const failures = [];
+  const rec = report || { pass() {}, fail() {} };
   let createdLeadId = '';
 
   async function scenario(name, fn) {
-    process.stdout.write(`\n→ PM add: ${name}\n`);
+    const label = `PM add: ${name}`;
+    process.stdout.write(`\n→ ${label}\n`);
     try {
       await fn();
+      rec.pass(label, createdLeadId ? `Lead ${createdLeadId}` : '');
       console.log('  ok');
     } catch (err) {
-      await saveFailedLoginShot(page, testInfo, `pm-add-${name}`).catch(() => {});
+      const shot = await saveFailedLoginShot(page, testInfo, `pm-add-${name}`).catch(() => '');
+      rec.fail(label, err, shot || '');
       failures.push(`PM add — ${name}: ${err.message}`);
       console.log(`  FAIL: ${err.message}`);
     }

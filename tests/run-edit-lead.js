@@ -10,21 +10,30 @@
 const { launchBrowser, newAppContext } = require('./helpers/browser');
 const { ensureDealerSession, saveDealerSession } = require('./helpers/login');
 const { editChosenLead } = require('./helpers/pm-edit-lead');
+const { createRunReport } = require('./helpers/run-report');
 
 async function main() {
+  const report = createRunReport('npm run test:edit');
   console.log('[edit] Opening one browser window…');
   const browser = await launchBrowser();
   const context = await newAppContext(browser, { reuseSession: true });
   const page = await context.newPage();
 
-  console.log('[edit] Using saved session if one exists (login only when needed)…');
-  await ensureDealerSession(page);
-  console.log(`[edit] Ready → ${page.url()}`);
+  try {
+    console.log('[edit] Using saved session if one exists (login only when needed)…');
+    await report.step('Login / session', () => ensureDealerSession(page), page);
+    console.log(`[edit] Ready → ${page.url()}`);
 
-  const result = await editChosenLead(page);
-  await saveDealerSession(context);
-  console.log(`\n[edit] Done. Updated ${result.leadId}`);
-  console.log('[edit] Browser left open. Close the window when done.');
+    const result = await report.step('Edit chosen Purchase Master lead', () => editChosenLead(page), page);
+    await saveDealerSession(context);
+    if (result?.leadId) report.note(`Updated ${result.leadId}`);
+    report.finish({ leadId: result?.leadId || '' });
+    console.log(`\n[edit] Done. Updated ${result.leadId}`);
+    console.log('[edit] Browser left open. Close the window when done.');
+  } catch (err) {
+    report.finish({ error: err });
+    throw err;
+  }
 }
 
 main().catch((err) => {

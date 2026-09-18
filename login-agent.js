@@ -9,10 +9,12 @@
  */
 
 const { launchBrowser, newAppContext, baseURL } = require('./tests/helpers/browser');
+const { dealerOtp } = require('./tests/helpers/login');
+const { createRunReport } = require('./tests/helpers/run-report');
 
 const BASE_URL = baseURL();
 const EMAIL = process.env.DMS_EMAIL || 'dealer@cartrade.com';
-const OTP = process.env.DMS_OTP || '919919';
+const OTP = dealerOtp();
 
 function captchaFromBody(body) {
   if (!body || typeof body !== 'object') return null;
@@ -57,48 +59,54 @@ async function fillOtp(page, otp) {
 }
 
 async function run() {
-  const browser = await launchBrowser();
-  const context = await newAppContext(browser);
-  const page = await context.newPage();
+  const report = createRunReport('npm run login');
+  try {
+    const browser = await launchBrowser();
+    const context = await newAppContext(browser);
+    const page = await context.newPage();
+    let captchaCode = null;
+    page.on('response', async (res) => {
+      if (res.request().method() !== 'POST' || !res.url().includes('/apis')) return;
+      const code = captchaFromBody(await parseJson(res));
+      if (code) captchaCode = code;
+    });
 
-  let captchaCode = null;
-  page.on('response', async (res) => {
-    if (res.request().method() !== 'POST' || !res.url().includes('/apis')) return;
-    const code = captchaFromBody(await parseJson(res));
-    if (code) captchaCode = code;
-  });
+    console.log(`[agent] Opening ${BASE_URL}/login`);
+    await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle' });
 
-  console.log(`[agent] Opening ${BASE_URL}/login`);
-  await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle' });
+    const emailInput = page.locator('input[placeholder="Email Address"]');
+    const captchaInput = page.locator('input[placeholder="Captcha"]');
+    await emailInput.waitFor({ state: 'visible', timeout: 20000 });
+    await page.locator('img.captcha-img').waitFor({ state: 'visible', timeout: 20000 });
 
-  const emailInput = page.locator('input[placeholder="Email Address"]');
-  const captchaInput = page.locator('input[placeholder="Captcha"]');
-  await emailInput.waitFor({ state: 'visible', timeout: 20000 });
-  await page.locator('img.captcha-img').waitFor({ state: 'visible', timeout: 20000 });
+    if (!captchaCode) {
+      console.log('[agent] Waiting for captcha API…');
+      captchaCode = await waitForCaptchaCode(page).catch(() => null);
+    }
+    if (!captchaCode) {
+      throw new Error('Could not read captcha. DEV API should return data_optional.captcha_code.');
+    }
+    console.log(`[agent] Captcha: ${captchaCode}`);
 
-  if (!captchaCode) {
-    console.log('[agent] Waiting for captcha API…');
-    captchaCode = await waitForCaptchaCode(page).catch(() => null);
+    await emailInput.fill(EMAIL);
+    await captchaInput.fill(captchaCode);
+    console.log(`[agent] Email: ${EMAIL} — clicking LOGIN`);
+    await page.getByRole('button', { name: /^LOGIN$/i }).click();
+
+    console.log(`[agent] OTP: ${OTP}`);
+    await fillOtp(page, OTP);
+    await page.getByRole('button', { name: /^Submit$/i }).click();
+
+    await page.waitForURL((url) => !url.pathname.endsWith('/login'), { timeout: 20000 });
+    console.log(`[agent] Logged in → ${page.url()}`);
+    report.pass('Dealer login', page.url());
+    report.finish();
+
+    console.log('[agent] Browser left open. Close the window or press Ctrl+C to exit.');
+  } catch (err) {
+    report.finish({ error: err });
+    throw err;
   }
-  if (!captchaCode) {
-    throw new Error('Could not read captcha. DEV API should return data_optional.captcha_code.');
-  }
-  console.log(`[agent] Captcha: ${captchaCode}`);
-
-  await emailInput.fill(EMAIL);
-  await captchaInput.fill(captchaCode);
-  console.log(`[agent] Email: ${EMAIL} — clicking LOGIN`);
-  await page.getByRole('button', { name: /^LOGIN$/i }).click();
-
-  console.log(`[agent] OTP: ${OTP}`);
-  await fillOtp(page, OTP);
-  await page.getByRole('button', { name: /^Submit$/i }).click();
-
-  await page.waitForURL((url) => !url.pathname.endsWith('/login'), { timeout: 20000 });
-  console.log(`[agent] Logged in → ${page.url()}`);
-
-  // Keep the browser open so you can use the session
-  console.log('[agent] Browser left open. Close the window or press Ctrl+C to exit.');
 }
 
 run().catch(async (err) => {

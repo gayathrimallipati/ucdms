@@ -13,8 +13,8 @@ Site: `https://dms.jlr.local`
 
 Dealer login:
 - Email: `dealer@cartrade.com`
-- OTP: `919919`
-- Captcha: on DEV, read `data_optional.captcha_code` from the API. On UAT/stage that field is omitted (`env_server !== 'dev'`), so read the captcha image and retry with refresh — do not sit on the login page waiting for a typed captcha.
+- OTP: `919919` on local/DEV; **always `369369` on UAT** (`generateNumericOtp` / `uat.ucdms.in`)
+- Captcha: retrieve the code the same way DMS verifies it. DEV (`env_server === 'dev'`) sends plaintext `data_optional.captcha_code`. UAT/stage omit that field — read Vue/`$http` `captcha_token`, JWT-decode `captcha_code`, then `data_decrypt` with `docker/projects/config.php` encryption (or `DMS_CONFIG_PHP` / `DMS_DATA_SECRET_KEY`). Do not OCR as the primary path.
 
 Commands:
 - `npm test` — login scenarios + all add-lead cases (never edit)
@@ -22,6 +22,7 @@ Commands:
 - `npm run test:edit` — edit flow only (user picks the lead in the browser)
 - `npm run test:stock` — My Stock only (user picks the exact INV ID in the browser)
 - `npm run test:flow` — one window: add once → edit (pick PM) → stock (pick INV) through Ready For Sale
+- Every script writes and opens `test-results/reports/latest.html`. Re-open with `npm run report`.
 
 Headed Chrome, one window, ignore HTTPS errors. Must also run on other machines (Chrome / Edge / Playwright Chromium).
 
@@ -36,19 +37,20 @@ DMS_HEADLESS=0
 DMS_EVAL_STRATEGY=mixed        # mixed | ok | notok
 DMS_REFURB_COST_CHANCE=0.5     # share of questions that get a random Ref. Exp amount; 0 disables
 DMS_STOCK_LISTING_PRICE=249000 # used only when listing_price is 0; Ready For Sale requires a non-zero price
+# DMS_CONFIG_PHP=C:/Users/Gayatri/OneDrive/Documents/docker/projects/config.php
 ```
 
 ---
 
 ## 2. Login
 
-Log in with the dealer credentials. Captcha comes from `data_optional.captcha_code` on DEV, or from the captcha image on UAT/stage. OTP is `DMS_OTP` (919919 locally, 369369 on UAT).
+Log in with the dealer credentials. Captcha is retrieved from the trained auth path: `data_optional.captcha_code` on DEV, otherwise JWT `captcha_token` + `data_decrypt` (same keys as `config.php` `encryption`). OTP is `919919` on local/DEV and `369369` on UAT (`generateNumericOtp`).
 
 Write multiple login scenarios: valid, invalid email, unknown user, wrong captcha, wrong OTP, empty fields.
 
 Rules:
 - Open the browser **once**. Run every login scenario in that same window; do not relaunch Chrome per case.
-- On failure, record it as a failed case, capture a screenshot (`test-results/failed-cases/`), reset the form, continue.
+- On failure, record it as a failed case, capture a screenshot (`test-results/failed-cases/`), reset the form, continue. After the run, open the HTML report (`test-results/reports/latest.html`).
 
 For **edit** (`npm run test:edit`): reuse the saved session (`test-results/auth/dealer.json`) only when it matches the current `DMS_URL` origin. Login (captcha + OTP) the first time, when the session expired, or after you change host (local → stage → UAT). Cookies and `jlr_logged` do not carry across domains. Do **not** reuse that session for `npm test`, which needs a clean login page.
 

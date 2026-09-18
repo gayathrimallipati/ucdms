@@ -10,24 +10,39 @@
 const { launchBrowser, newAppContext } = require('./helpers/browser');
 const { ensureDealerSession, saveDealerSession } = require('./helpers/login');
 const { runStockWorkflow } = require('./helpers/stock-workflow');
+const { createRunReport } = require('./helpers/run-report');
 
 async function main() {
+  const report = createRunReport('npm run test:stock');
   console.log('[stock] Opening one browser window…');
   const browser = await launchBrowser();
   const context = await newAppContext(browser, { reuseSession: true });
   const page = await context.newPage();
 
-  console.log('[stock] Reusing the saved dealer session when valid…');
-  await ensureDealerSession(page);
-  const result = await runStockWorkflow(page);
-  await saveDealerSession(context);
-
-  console.log(`\n[stock] Done: ${result.stockId}`);
-  console.log(`[stock] Certification: ${result.certification.certificationType || 'not applicable'}`);
-  console.log(`[stock] Eligible: ${result.certification.eligible ? 'yes' : 'no'}`);
-  console.log(`[stock] Ready For Sale: ${result.certification.readyForSale ? 'yes' : 'no'}`);
-  if (result.certification.message) console.log(`[stock] Server: ${result.certification.message}`);
-  console.log('[stock] Browser left open. Close the window when done.');
+  try {
+    console.log('[stock] Reusing the saved dealer session when valid…');
+    await report.step('Login / session', () => ensureDealerSession(page), page);
+    const result = await report.step('My Stock through Ready For Sale', () => runStockWorkflow(page), page);
+    await saveDealerSession(context);
+    const cert = result?.certification || {};
+    report.note(`Stock ${result?.stockId || ''}`);
+    report.note(`Certification: ${cert.certificationType || 'not applicable'}`);
+    report.note(`Ready For Sale: ${cert.readyForSale ? 'yes' : 'no'}`);
+    report.finish({
+      stockId: result?.stockId || '',
+      certification: cert.certificationType || '',
+      readyForSale: Boolean(cert.readyForSale),
+    });
+    console.log(`\n[stock] Done: ${result.stockId}`);
+    console.log(`[stock] Certification: ${cert.certificationType || 'not applicable'}`);
+    console.log(`[stock] Eligible: ${cert.eligible ? 'yes' : 'no'}`);
+    console.log(`[stock] Ready For Sale: ${cert.readyForSale ? 'yes' : 'no'}`);
+    if (cert.message) console.log(`[stock] Server: ${cert.message}`);
+    console.log('[stock] Browser left open. Close the window when done.');
+  } catch (err) {
+    report.finish({ error: err });
+    throw err;
+  }
 }
 
 main().catch((error) => {

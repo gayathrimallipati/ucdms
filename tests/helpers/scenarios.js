@@ -1,11 +1,11 @@
 const { expect } = require('@playwright/test');
 const {
   VALID_EMAIL,
-  VALID_OTP,
   UNKNOWN_EMAIL,
   listenForCaptcha,
   readCaptcha,
   fillOtp,
+  otpForPage,
   clearOtp,
   saveFailedLoginShot,
   formError,
@@ -17,18 +17,21 @@ const { runPmAddScenarios } = require('./pm-add-scenarios');
  * Runs every login scenario on the same page.
  * Opens /login once. Does not create another browser or tab.
  */
-async function runLoginScenarios(page, testInfo) {
+async function runLoginScenarios(page, testInfo, report) {
   const failures = [];
+  const rec = report || { pass() {}, fail() {} };
   const captcha = listenForCaptcha(page);
 
   async function scenario(name, fn, { loginFailed = false } = {}) {
     process.stdout.write(`\n→ ${name}\n`);
     try {
       await fn();
-      if (loginFailed) await saveFailedLoginShot(page, testInfo, name);
+      const shot = loginFailed ? await saveFailedLoginShot(page, testInfo, name) : '';
+      rec.pass(name, loginFailed ? 'expected rejection' : '', shot || '');
       console.log(`  ok`);
     } catch (err) {
-      await saveFailedLoginShot(page, testInfo, `unexpected-${name}`).catch(() => {});
+      const shot = await saveFailedLoginShot(page, testInfo, `unexpected-${name}`).catch(() => '');
+      rec.fail(name, err, shot || '');
       failures.push(`${name}: ${err.message}`);
       console.log(`  FAIL: ${err.message}`);
     }
@@ -190,14 +193,14 @@ async function runLoginScenarios(page, testInfo) {
   }, { loginFailed: true });
 
   await scenario('valid OTP reaches dashboard', async () => {
-    await fillOtp(page, VALID_OTP);
+    await fillOtp(page, await otpForPage(page));
     await page.getByRole('button', { name: /^Submit$/i }).click();
     await page.waitForURL((url) => !url.pathname.endsWith('/login'), { timeout: 20000 });
     await expect(page).not.toHaveURL(/\/login$/);
     await expect(page).toHaveURL(/\/dashboard|\/home|\/stock|\/leads|\/purchase-master/i);
   });
 
-  const addResult = await runPmAddScenarios(page, testInfo);
+  const addResult = await runPmAddScenarios(page, testInfo, report);
   failures.push(...(addResult.failures || []));
 
   return failures;

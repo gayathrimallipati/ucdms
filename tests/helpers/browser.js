@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('@playwright/test');
-const { AUTH_STATE_PATH, hasSavedDealerSession, sessionMatchesCurrentHost } = require('./login');
 
 function loadEnvFile() {
   const file = path.join(process.cwd(), '.env');
@@ -21,6 +20,8 @@ function loadEnvFile() {
 }
 
 loadEnvFile();
+
+const { AUTH_STATE_PATH, hasSavedDealerSession, sessionMatchesCurrentHost } = require('./login');
 
 function isHeadless() {
   const v = String(process.env.DMS_HEADLESS || '').toLowerCase();

@@ -38,7 +38,10 @@ const { runLoginScenarios } = require('./helpers/scenarios');
  */
 test('Purchase Master add lead — all cases in one Chrome session', async ({ page }, testInfo) => {
   test.setTimeout(900000);
-  const failures = await runLoginScenarios(page, testInfo);
+  const { createRunReport } = require('./helpers/run-report');
+  const report = createRunReport('playwright: add lead');
+  const failures = await runLoginScenarios(page, testInfo, report);
+  report.finish();
   if (failures.length) {
     throw new Error(`${failures.length} scenario(s) failed:\n${failures.join('\n')}`);
   }
